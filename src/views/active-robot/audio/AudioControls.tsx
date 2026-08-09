@@ -1,17 +1,40 @@
 import React from 'react';
-import { Box, Typography, IconButton, Slider, Tooltip } from '@mui/material';
+import {
+  Box,
+  Typography,
+  IconButton,
+  Slider,
+  Tooltip,
+  Select,
+  MenuItem,
+  CircularProgress,
+} from '@mui/material';
 import MicIcon from '@mui/icons-material/Mic';
 import MicOffIcon from '@mui/icons-material/MicOff';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import VolumeOffIcon from '@mui/icons-material/VolumeOff';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import HearingDisabledIcon from '@mui/icons-material/HearingDisabled';
 import AudioLevelBars from './AudioLevelBars';
 import DoAIndicator from './DoAIndicator';
+import type { AudioDevice } from './hooks/useAudioControls';
 import { useDoA } from '../../../hooks/audio/useDoA';
 import { useWebRTCStreamContext } from '../../../contexts/WebRTCStreamContext';
 import useAudioAnalyser from '../../../hooks/media/useAudioAnalyser';
 import { ACCENT, accentAlpha, whiteAlpha, blackAlpha } from '@styles/tokens';
 import { DURATION, FONT_WEIGHT, TYPO, transition, useAppPalette } from '@styles';
+
+/** Options for the per-scope device dropdown; omitted entirely when unsupported. */
+interface DevicePicker {
+  devices: AudioDevice[];
+  /** Currently selected device name, as reported by the daemon. */
+  selected: string | null;
+  onChange: (deviceName: string) => void;
+  onRefresh: () => void;
+  loading: boolean;
+  /** True while a switch is in flight — the pipeline rebuild takes ~10s. */
+  applying: boolean;
+}
 
 export interface AudioControlsProps {
   volume: number;
@@ -25,6 +48,15 @@ export interface AudioControlsProps {
   onMicrophoneVolumeChange?: (value: number) => void;
   onSpeakerMute: () => void;
   onMicrophoneMute: () => void;
+  /** False on daemons without the audio-devices router — renders read-only labels. */
+  deviceSelectionSupported?: boolean;
+  outputDevices?: AudioDevice[];
+  inputDevices?: AudioDevice[];
+  devicesLoading?: boolean;
+  applyingDevice?: 'output' | 'input' | null;
+  onRefreshDevices?: (scope: 'output' | 'input') => void;
+  onSpeakerDeviceChange?: (deviceName: string) => void;
+  onMicrophoneDeviceChange?: (deviceName: string) => void;
   /** @deprecated Theme mode is now read from `useAppPalette()`. Prop kept for back-compat but ignored. */
   darkMode?: boolean;
   disabled?: boolean;
@@ -47,6 +79,14 @@ function AudioControls({
   onMicrophoneVolumeChange,
   onSpeakerMute,
   onMicrophoneMute,
+  deviceSelectionSupported = false,
+  outputDevices = [],
+  inputDevices = [],
+  devicesLoading = false,
+  applyingDevice = null,
+  onRefreshDevices,
+  onSpeakerDeviceChange,
+  onMicrophoneDeviceChange,
   disabled = false,
   isSleeping = false,
 }: AudioControlsProps): React.ReactElement {
@@ -119,6 +159,105 @@ function AudioControls({
     letterSpacing: '0.02em',
   };
 
+  const selectStyle = {
+    ...deviceTextStyle,
+    width: '100%',
+    '& .MuiSelect-select': {
+      ...deviceTextStyle,
+      padding: 0,
+      paddingRight: '18px !important',
+    },
+    '& .MuiSelect-icon': {
+      fontSize: TYPO.md,
+      right: 0,
+      color: palette.isDark ? whiteAlpha(0.4) : blackAlpha(0.4),
+    },
+    '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
+    '&:hover .MuiSelect-select': { color: ACCENT.main },
+    '&.Mui-disabled': { opacity: 0.6 },
+  };
+
+  /**
+   * Device row: a dropdown when the daemon supports selection, otherwise the
+   * original read-only label. Selecting rebuilds the media pipeline (~10s), so
+   * the control is disabled while `applying` and shows a spinner.
+   */
+  const renderDeviceRow = (device: string, picker: DevicePicker | null): React.ReactElement => {
+    if (!picker || picker.devices.length === 0) {
+      return <Typography sx={deviceTextStyle}>{device}</Typography>;
+    }
+
+    const selectedEntry = picker.devices.find(d => d.name === picker.selected);
+    // Only warn once we know the device: absent AEC is the real trade-off of
+    // any external output, and it is otherwise silent until mid-conversation.
+    const losesAec = selectedEntry ? !selectedEntry.aec : false;
+
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, width: '100%' }}>
+        <Select
+          value={picker.devices.some(d => d.name === picker.selected) ? picker.selected : ''}
+          onChange={e => picker.onChange(e.target.value as string)}
+          onOpen={() => picker.onRefresh()}
+          disabled={disabled || picker.applying}
+          variant="outlined"
+          size="small"
+          displayEmpty
+          renderValue={val => {
+            if (picker.applying) return 'Switching…';
+            if (!val) return picker.loading ? 'Loading…' : device;
+            return val as string;
+          }}
+          sx={selectStyle}
+          MenuProps={{ PaperProps: { sx: { maxHeight: 240 } } }}
+        >
+          {/*
+            Clearing is not the same as picking the built-in by name: with no
+            selection the daemon uses the stock ALSA path, whereas any explicit
+            selection routes through PipeWire. This item issues the DELETE that
+            restores stock behavior.
+          */}
+          <MenuItem value="" sx={{ fontSize: TYPO.micro, fontStyle: 'italic' }}>
+            Default (built-in)
+          </MenuItem>
+          {picker.devices.map(d => (
+            <MenuItem key={d.name} value={d.name} sx={{ fontSize: TYPO.micro }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  minWidth: 0,
+                  width: '100%',
+                }}
+              >
+                <Box component="span" sx={{ flex: 1, minWidth: 0 }}>
+                  {d.name}
+                </Box>
+                {!d.aec && (
+                  <Tooltip title="No hardware echo cancellation on this output" arrow>
+                    <HearingDisabledIcon sx={{ fontSize: TYPO.sm, opacity: 0.5, flexShrink: 0 }} />
+                  </Tooltip>
+                )}
+              </Box>
+            </MenuItem>
+          ))}
+        </Select>
+        {picker.applying && <CircularProgress size={10} sx={{ flexShrink: 0 }} />}
+        {!picker.applying && losesAec && (
+          <Tooltip
+            title="Echo cancellation is done in hardware by the built-in speaker path. On an external output the robot will hear its own voice — prefer push-to-talk or half-duplex."
+            arrow
+            placement="top"
+          >
+            <HearingDisabledIcon
+              sx={{ fontSize: TYPO.sm, color: ACCENT.main, opacity: 0.75, flexShrink: 0 }}
+            />
+          </Tooltip>
+        )}
+      </Box>
+    );
+  };
+
   const renderControl = (
     label: string,
     tooltip: string,
@@ -129,7 +268,8 @@ function AudioControls({
     onMute: () => void,
     onVolumeChange: (value: number) => void,
     extraIndicator: React.ReactNode = null,
-    externalAudioLevel: number | null = null
+    externalAudioLevel: number | null = null,
+    devicePicker: DevicePicker | null = null
   ): React.ReactElement => (
     <Box
       sx={{
@@ -193,7 +333,7 @@ function AudioControls({
               overflow: 'hidden',
             }}
           >
-            <Typography sx={deviceTextStyle}>{device}</Typography>
+            {renderDeviceRow(device, devicePicker)}
             {platform && <Typography sx={platformTextStyle}>{platform}</Typography>}
           </Box>
 
@@ -294,7 +434,19 @@ function AudioControls({
         volume,
         volume > 0,
         onSpeakerMute,
-        onVolumeChange
+        onVolumeChange,
+        null,
+        null,
+        deviceSelectionSupported && onSpeakerDeviceChange
+          ? {
+              devices: outputDevices,
+              selected: speakerDevice,
+              onChange: onSpeakerDeviceChange,
+              onRefresh: () => onRefreshDevices?.('output'),
+              loading: devicesLoading,
+              applying: applyingDevice === 'output',
+            }
+          : null
       )}
       {renderControl(
         'Microphone',
@@ -310,7 +462,17 @@ function AudioControls({
           <DoAIndicator angle={angle} isTalking={isTalking} isAvailable={isAvailable} />
         ) : null,
         // Audio waveform when WebRTC is available AND robot is awake
-        isWebRTCAvailable && !isSleeping ? microphoneLevel : null
+        isWebRTCAvailable && !isSleeping ? microphoneLevel : null,
+        deviceSelectionSupported && onMicrophoneDeviceChange
+          ? {
+              devices: inputDevices,
+              selected: microphoneDevice,
+              onChange: onMicrophoneDeviceChange,
+              onRefresh: () => onRefreshDevices?.('input'),
+              loading: devicesLoading,
+              applying: applyingDevice === 'input',
+            }
+          : null
       )}
     </Box>
   );

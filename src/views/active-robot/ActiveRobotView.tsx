@@ -267,6 +267,14 @@ function ActiveRobotView({
     handleMicrophoneVolumeChange,
     handleSpeakerMute,
     handleMicrophoneMute,
+    deviceSelectionSupported,
+    outputDevices,
+    inputDevices,
+    devicesLoading,
+    applyingDevice,
+    refreshAudioDevices,
+    handleSpeakerDeviceChange,
+    handleMicrophoneDeviceChange,
   } = useAudioControls(isActive);
 
   // Apps and robot position are pre-loaded during StartupScanView + wake-up sequence.
@@ -588,6 +596,14 @@ function ActiveRobotView({
                 onMicrophoneVolumeChange={handleMicrophoneVolumeChange}
                 onSpeakerMute={handleSpeakerMute}
                 onMicrophoneMute={handleMicrophoneMute}
+                deviceSelectionSupported={deviceSelectionSupported}
+                outputDevices={outputDevices}
+                inputDevices={inputDevices}
+                devicesLoading={devicesLoading}
+                applyingDevice={applyingDevice}
+                onRefreshDevices={refreshAudioDevices}
+                onSpeakerDeviceChange={handleSpeakerDeviceChange}
+                onMicrophoneDeviceChange={handleMicrophoneDeviceChange}
                 disabled={isBusyState && !isAppRunning}
                 isSleeping={false}
               />

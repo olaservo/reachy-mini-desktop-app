@@ -20,6 +20,11 @@ export const DAEMON_CONFIG = {
     STARTUP_CHECK: 3000,
     VERSION: 3000,
     EMOTIONS_CHECK: 3000,
+    // Selecting an audio output rebuilds the media pipeline (the sink is fixed
+    // at construction), which takes ~10s on the robot. Generous headroom here:
+    // the request must NOT be retried on timeout, since each enumeration cycle
+    // churns the audio graph and can drop an active Bluetooth link.
+    AUDIO_DEVICE_SWITCH: 20000,
     APPS_LIST: 5000,
     // The catalog routes are not local lookups: the daemon queries the
     // HuggingFace API for every source before answering, which on a Wireless
@@ -179,6 +184,13 @@ export const DAEMON_CONFIG = {
     VOLUME_SET: '/api/volume/set',
     MICROPHONE_CURRENT: '/api/volume/microphone/current',
     MICROPHONE_SET: '/api/volume/microphone/set',
+    // Audio output/input device selection. Only present on daemons that ship
+    // the audio-devices router; the UI treats a 404 as "not supported" and
+    // falls back to the read-only device label.
+    AUDIO_DEVICES_OUTPUT: '/api/audio-devices/output',
+    AUDIO_DEVICES_INPUT: '/api/audio-devices/input',
+    AUDIO_DEVICES_OUTPUT_SELECTED: '/api/audio-devices/output/selected',
+    AUDIO_DEVICES_INPUT_SELECTED: '/api/audio-devices/input/selected',
   },
 
   // Endpoints to NOT log (frequent calls).

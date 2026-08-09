@@ -9,6 +9,28 @@ interface VolumeApiResponse {
   platform?: string | null;
 }
 
+/**
+ * One selectable audio endpoint as reported by `/api/audio-devices/{output,input}`.
+ *
+ * Devices are keyed by `name`, deliberately: an ALSA card index shifts as USB
+ * devices come and go, the name is stable across replug and reboot.
+ *
+ * `aec` is true only for the built-in card. Echo cancellation on Reachy Mini is
+ * done in hardware by the XMOS chip, which needs to drive the speaker itself to
+ * have an AEC reference — so any external output silently loses it. The UI
+ * surfaces that rather than letting it be a surprise mid-conversation.
+ */
+export interface AudioDevice {
+  name: string;
+  aec: boolean;
+}
+
+interface AudioDeviceListResponse {
+  devices?: AudioDevice[];
+}
+
+export type AudioDeviceScope = 'output' | 'input';
+
 export interface UseAudioControlsResult {
   volume: number;
   microphoneVolume: number;
@@ -21,6 +43,16 @@ export interface UseAudioControlsResult {
   handleMicrophoneVolumeChange: (newVolume: number) => void;
   handleSpeakerMute: () => void;
   handleMicrophoneMute: () => void;
+  /** False when the daemon has no audio-devices router (404) — UI stays read-only. */
+  deviceSelectionSupported: boolean;
+  outputDevices: AudioDevice[];
+  inputDevices: AudioDevice[];
+  devicesLoading: boolean;
+  /** Which scope is mid-switch, so the UI can block further input during the rebuild. */
+  applyingDevice: AudioDeviceScope | null;
+  refreshAudioDevices: (scope: AudioDeviceScope) => void;
+  handleSpeakerDeviceChange: (deviceName: string) => void;
+  handleMicrophoneDeviceChange: (deviceName: string) => void;
 }
 
 /**
@@ -32,7 +64,9 @@ export interface UseAudioControlsResult {
 export function useAudioControls(isActive: boolean): UseAudioControlsResult {
   const { api } = useActiveRobotContext();
   const { buildApiUrl, fetchWithTimeout, config } = api;
-  const DAEMON_CONFIG = config as { TIMEOUTS: { VERSION: number } };
+  const DAEMON_CONFIG = config as {
+    TIMEOUTS: { VERSION: number; AUDIO_DEVICE_SWITCH: number };
+  };
 
   const [volume, setVolume] = useState<number>(50);
   const [microphoneVolume, setMicrophoneVolume] = useState<number>(50);
@@ -42,13 +76,20 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
   const [speakerPlatform, setSpeakerPlatform] = useState<string | null>(null);
   const [microphonePlatform, setMicrophonePlatform] = useState<string | null>(null);
 
+  const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
+  const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
+  const [deviceSelectionSupported, setDeviceSelectionSupported] = useState<boolean>(false);
+  const [devicesLoading, setDevicesLoading] = useState<boolean>(false);
+  const [applyingDevice, setApplyingDevice] = useState<AudioDeviceScope | null>(null);
+
   const volumeDebounceTimeoutRef = useRef<TimeoutId | null>(null);
   const microphoneDebounceTimeoutRef = useRef<TimeoutId | null>(null);
+  // Guards against overlapping selects. Each enumeration/selection cycle churns
+  // the audio graph, and concurrent cycles can tear down an active A2DP link.
+  const deviceSwitchInFlightRef = useRef<boolean>(false);
 
-  useEffect(() => {
-    if (!isActive) return;
-
-    const fetchVolumeValue = async (
+  const fetchVolumeValue = useCallback(
+    async (
       endpoint: string,
       setter: (value: number) => void,
       deviceSetter: ((value: string) => void) | null,
@@ -77,23 +118,155 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
       } catch (err) {
         console.warn(`Failed to fetch ${label}:`, err);
       }
-    };
+    },
+    []
+  );
 
-    fetchVolumeValue(
-      '/api/volume/current',
-      setVolume,
-      setSpeakerDevice,
-      setSpeakerPlatform,
-      'volume'
-    );
-    fetchVolumeValue(
-      '/api/volume/microphone/current',
-      setMicrophoneVolume,
-      setMicrophoneDevice,
-      setMicrophonePlatform,
-      'microphone volume'
-    );
-  }, [isActive]);
+  /** Re-read volume + device label for one scope. Volume follows the selected sink. */
+  const refreshVolumeState = useCallback(
+    (scope: AudioDeviceScope): void => {
+      if (scope === 'output') {
+        fetchVolumeValue(
+          '/api/volume/current',
+          setVolume,
+          setSpeakerDevice,
+          setSpeakerPlatform,
+          'volume'
+        );
+      } else {
+        fetchVolumeValue(
+          '/api/volume/microphone/current',
+          setMicrophoneVolume,
+          setMicrophoneDevice,
+          setMicrophonePlatform,
+          'microphone volume'
+        );
+      }
+    },
+    [fetchVolumeValue]
+  );
+
+  useEffect(() => {
+    if (!isActive) return;
+    refreshVolumeState('output');
+    refreshVolumeState('input');
+  }, [isActive, refreshVolumeState]);
+
+  /**
+   * Load the selectable devices for one scope.
+   *
+   * A 404 means the daemon predates the audio-devices router: we latch
+   * `deviceSelectionSupported` to false and the UI keeps the read-only label,
+   * so this is safe to run against a stock daemon.
+   */
+  const refreshAudioDevices = useCallback(async (scope: AudioDeviceScope): Promise<void> => {
+    const endpoint = scope === 'output' ? '/api/audio-devices/output' : '/api/audio-devices/input';
+    setDevicesLoading(true);
+    try {
+      const response = await fetchWithTimeout(
+        buildApiUrl(endpoint),
+        {},
+        DAEMON_CONFIG.TIMEOUTS.VERSION,
+        { silent: true }
+      );
+      if (response.status === 404) {
+        setDeviceSelectionSupported(false);
+        return;
+      }
+      if (!response.ok) {
+        console.warn(`Failed to list ${scope} audio devices:`, response.status);
+        return;
+      }
+      const data = (await response.json()) as AudioDeviceListResponse;
+      const devices = Array.isArray(data.devices) ? data.devices : [];
+      setDeviceSelectionSupported(true);
+      if (scope === 'output') {
+        setOutputDevices(devices);
+      } else {
+        setInputDevices(devices);
+      }
+    } catch (err) {
+      console.warn(`Failed to list ${scope} audio devices:`, err);
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isActive) return;
+    refreshAudioDevices('output');
+    refreshAudioDevices('input');
+  }, [isActive, refreshAudioDevices]);
+
+  /**
+   * Select a device for one scope, or clear the selection when `deviceName` is
+   * empty (which reverts to the built-in default and restores hardware AEC).
+   *
+   * Deliberately a *single* request with no retry on failure: each
+   * enumeration/selection cycle churns the audio graph, so retrying a failed
+   * select makes things worse rather than better. On failure we re-read the
+   * real state instead and let the user decide.
+   */
+  const applyDeviceSelection = useCallback(
+    async (scope: AudioDeviceScope, deviceName: string): Promise<void> => {
+      if (deviceSwitchInFlightRef.current) return;
+      deviceSwitchInFlightRef.current = true;
+      setApplyingDevice(scope);
+
+      const endpoint =
+        scope === 'output'
+          ? '/api/audio-devices/output/selected'
+          : '/api/audio-devices/input/selected';
+      const clearing = deviceName === '';
+
+      try {
+        const response = await fetchWithTimeout(
+          buildApiUrl(endpoint),
+          clearing
+            ? { method: 'DELETE' }
+            : {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_name: deviceName }),
+              },
+          DAEMON_CONFIG.TIMEOUTS.AUDIO_DEVICE_SWITCH,
+          {
+            silent: false,
+            label: clearing
+              ? `Clear ${scope} audio device`
+              : `Select ${scope} audio device "${deviceName}"`,
+          }
+        );
+        if (!response.ok) {
+          console.warn(`Failed to select ${scope} audio device:`, response.status);
+        }
+      } catch (err) {
+        console.warn(`Failed to select ${scope} audio device:`, err);
+      } finally {
+        deviceSwitchInFlightRef.current = false;
+        setApplyingDevice(null);
+        // Re-read regardless of outcome: the daemon is the source of truth for
+        // what is actually selected, and the volume tracks the new sink.
+        refreshVolumeState(scope);
+        refreshAudioDevices(scope);
+      }
+    },
+    [refreshVolumeState, refreshAudioDevices]
+  );
+
+  const handleSpeakerDeviceChange = useCallback(
+    (deviceName: string): void => {
+      applyDeviceSelection('output', deviceName);
+    },
+    [applyDeviceSelection]
+  );
+
+  const handleMicrophoneDeviceChange = useCallback(
+    (deviceName: string): void => {
+      applyDeviceSelection('input', deviceName);
+    },
+    [applyDeviceSelection]
+  );
 
   const updateVolumeInApi = useCallback(async (newVolume: number): Promise<void> => {
     try {
@@ -299,5 +472,13 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
     handleMicrophoneVolumeChange,
     handleSpeakerMute,
     handleMicrophoneMute,
+    deviceSelectionSupported,
+    outputDevices,
+    inputDevices,
+    devicesLoading,
+    applyingDevice,
+    refreshAudioDevices,
+    handleSpeakerDeviceChange,
+    handleMicrophoneDeviceChange,
   };
 }
