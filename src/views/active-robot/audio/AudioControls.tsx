@@ -183,7 +183,10 @@ function AudioControls({
    * the control is disabled while `applying` and shows a spinner.
    */
   const renderDeviceRow = (device: string, picker: DevicePicker | null): React.ReactElement => {
-    if (!picker || picker.devices.length === 0) {
+    // An empty list while a scan is in flight still gets a dropdown, so that
+    // re-opening the picker shows the scan rather than silently falling back
+    // to the read-only label.
+    if (!picker || (picker.devices.length === 0 && !picker.loading)) {
       return <Typography sx={deviceTextStyle}>{device}</Typography>;
     }
 
@@ -219,6 +222,14 @@ function AudioControls({
           <MenuItem value="" sx={{ fontSize: TYPO.micro, fontStyle: 'italic' }}>
             Default (built-in)
           </MenuItem>
+          {picker.loading && picker.devices.length === 0 && (
+            <MenuItem disabled sx={{ fontSize: TYPO.micro }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                <CircularProgress size={12} thickness={3} />
+                <em>Scanning devices…</em>
+              </Box>
+            </MenuItem>
+          )}
           {picker.devices.map(d => (
             <MenuItem key={d.name} value={d.name} sx={{ fontSize: TYPO.micro }}>
               <Box

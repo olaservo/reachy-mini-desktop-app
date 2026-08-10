@@ -194,7 +194,14 @@ export const DAEMON_CONFIG = {
   },
 
   // Endpoints to NOT log (frequent calls).
-  SILENT_ENDPOINTS: ['/api/state/full', '/api/daemon/status', '/api/apps/list-available/installed'],
+  SILENT_ENDPOINTS: [
+    '/api/state/full',
+    '/api/daemon/status',
+    '/api/apps/list-available/installed',
+    // Device lists are re-fetched every time a picker opens.
+    '/api/audio-devices/output',
+    '/api/audio-devices/input',
+  ],
 } as const;
 
 /**
