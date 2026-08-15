@@ -29,6 +29,11 @@ interface AudioDeviceListResponse {
   devices?: AudioDevice[];
 }
 
+/** Reply from `/api/audio-devices/{output,input}/selected`; null means no explicit selection. */
+interface SelectedDeviceResponse {
+  device_name?: string | null;
+}
+
 export type AudioDeviceScope = 'output' | 'input';
 
 export interface UseAudioControlsResult {
@@ -38,6 +43,17 @@ export interface UseAudioControlsResult {
   microphoneDevice: string | null;
   speakerPlatform: string | null;
   microphonePlatform: string | null;
+  /**
+   * Persisted device selection, from `/api/audio-devices/{output,input}/selected`.
+   *
+   * Distinct from `speakerDevice`/`microphoneDevice`, which report the sink the
+   * daemon is driving right now. The two diverge while a selection is being
+   * applied — the pipeline rebuild leaves the old sink live for a moment — and
+   * when the selected device is gone and playback has fallen back to built-in.
+   * The dropdown must follow the selection, not the live sink.
+   */
+  selectedOutputDevice: string | null;
+  selectedInputDevice: string | null;
   handleVolumeChange: (newVolume: number) => void;
   handleMicrophoneChange: (enabled: boolean) => void;
   handleMicrophoneVolumeChange: (newVolume: number) => void;
@@ -75,6 +91,9 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
   const [microphoneDevice, setMicrophoneDevice] = useState<string | null>(null);
   const [speakerPlatform, setSpeakerPlatform] = useState<string | null>(null);
   const [microphonePlatform, setMicrophonePlatform] = useState<string | null>(null);
+
+  const [selectedOutputDevice, setSelectedOutputDevice] = useState<string | null>(null);
+  const [selectedInputDevice, setSelectedInputDevice] = useState<string | null>(null);
 
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
@@ -198,6 +217,44 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
     refreshAudioDevices('input');
   }, [isActive, refreshAudioDevices]);
 
+  const applySelected = useCallback((scope: AudioDeviceScope, name: string | null): void => {
+    if (scope === 'output') {
+      setSelectedOutputDevice(name);
+    } else {
+      setSelectedInputDevice(name);
+    }
+  }, []);
+
+  /** Re-read the persisted selection for one scope. Silent on stock daemons (404). */
+  const refreshSelectedDevice = useCallback(
+    async (scope: AudioDeviceScope): Promise<void> => {
+      const endpoint =
+        scope === 'output'
+          ? '/api/audio-devices/output/selected'
+          : '/api/audio-devices/input/selected';
+      try {
+        const response = await fetchWithTimeout(
+          buildApiUrl(endpoint),
+          {},
+          DAEMON_CONFIG.TIMEOUTS.VERSION,
+          { silent: true }
+        );
+        if (!response.ok) return;
+        const data = (await response.json()) as SelectedDeviceResponse;
+        applySelected(scope, data.device_name ?? null);
+      } catch (err) {
+        console.warn(`Failed to read selected ${scope} audio device:`, err);
+      }
+    },
+    [applySelected]
+  );
+
+  useEffect(() => {
+    if (!isActive) return;
+    refreshSelectedDevice('output');
+    refreshSelectedDevice('input');
+  }, [isActive, refreshSelectedDevice]);
+
   /**
    * Select a device for one scope, or clear the selection when `deviceName` is
    * empty (which reverts to the built-in default and restores hardware AEC).
@@ -239,6 +296,12 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
         );
         if (!response.ok) {
           console.warn(`Failed to select ${scope} audio device:`, response.status);
+        } else {
+          // Both verbs reply with the stored selection. Take it from the reply
+          // rather than re-reading the live sink, which still names the old
+          // device until the pipeline rebuild finishes.
+          const data = (await response.json()) as SelectedDeviceResponse;
+          applySelected(scope, data.device_name ?? null);
         }
       } catch (err) {
         console.warn(`Failed to select ${scope} audio device:`, err);
@@ -247,11 +310,12 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
         setApplyingDevice(null);
         // Re-read regardless of outcome: the daemon is the source of truth for
         // what is actually selected, and the volume tracks the new sink.
+        refreshSelectedDevice(scope);
         refreshVolumeState(scope);
         refreshAudioDevices(scope);
       }
     },
-    [refreshVolumeState, refreshAudioDevices]
+    [refreshVolumeState, refreshAudioDevices, refreshSelectedDevice, applySelected]
   );
 
   const handleSpeakerDeviceChange = useCallback(
@@ -467,6 +531,8 @@ export function useAudioControls(isActive: boolean): UseAudioControlsResult {
     microphoneDevice,
     speakerPlatform,
     microphonePlatform,
+    selectedOutputDevice,
+    selectedInputDevice,
     handleVolumeChange,
     handleMicrophoneChange,
     handleMicrophoneVolumeChange,

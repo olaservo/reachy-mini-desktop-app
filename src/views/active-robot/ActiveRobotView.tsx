@@ -270,6 +270,8 @@ function ActiveRobotView({
     deviceSelectionSupported,
     outputDevices,
     inputDevices,
+    selectedOutputDevice,
+    selectedInputDevice,
     devicesLoading,
     applyingDevice,
     refreshAudioDevices,
@@ -599,6 +601,8 @@ function ActiveRobotView({
                 deviceSelectionSupported={deviceSelectionSupported}
                 outputDevices={outputDevices}
                 inputDevices={inputDevices}
+                selectedOutputDevice={selectedOutputDevice}
+                selectedInputDevice={selectedInputDevice}
                 devicesLoading={devicesLoading}
                 applyingDevice={applyingDevice}
                 onRefreshDevices={refreshAudioDevices}

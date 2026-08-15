@@ -52,6 +52,9 @@ export interface AudioControlsProps {
   deviceSelectionSupported?: boolean;
   outputDevices?: AudioDevice[];
   inputDevices?: AudioDevice[];
+  /** Persisted selection. Drives the dropdown; the device labels track the live sink. */
+  selectedOutputDevice?: string | null;
+  selectedInputDevice?: string | null;
   devicesLoading?: boolean;
   applyingDevice?: 'output' | 'input' | null;
   onRefreshDevices?: (scope: 'output' | 'input') => void;
@@ -82,6 +85,8 @@ function AudioControls({
   deviceSelectionSupported = false,
   outputDevices = [],
   inputDevices = [],
+  selectedOutputDevice = null,
+  selectedInputDevice = null,
   devicesLoading = false,
   applyingDevice = null,
   onRefreshDevices,
@@ -451,7 +456,7 @@ function AudioControls({
         deviceSelectionSupported && onSpeakerDeviceChange
           ? {
               devices: outputDevices,
-              selected: speakerDevice,
+              selected: selectedOutputDevice,
               onChange: onSpeakerDeviceChange,
               onRefresh: () => onRefreshDevices?.('output'),
               loading: devicesLoading,
@@ -477,7 +482,7 @@ function AudioControls({
         deviceSelectionSupported && onMicrophoneDeviceChange
           ? {
               devices: inputDevices,
-              selected: microphoneDevice,
+              selected: selectedInputDevice,
               onChange: onMicrophoneDeviceChange,
               onRefresh: () => onRefreshDevices?.('input'),
               loading: devicesLoading,
