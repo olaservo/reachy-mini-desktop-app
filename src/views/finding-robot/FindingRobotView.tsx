@@ -35,6 +35,7 @@ import { useToast } from '../../hooks/useToast';
 import { probeWifiHost, type WifiProbeResult } from '../../utils/probeWifiHost';
 import { MIN_WIRELESS_DAEMON_VERSION } from '../../constants/daemonVersion';
 import { telemetry } from '../../utils/telemetry';
+import { markDevConnected, wasDevConnected } from '../../utils/devAutoReconnect';
 import reachyBuste from '../../assets/reachy-buste.png';
 import {
   ACCENT,
@@ -446,7 +447,11 @@ export default function FindingRobotView() {
         if (isAvailable) {
           setSelectedMode(savedMode);
           hasRestoredFromStorage.current = true;
-          setAutoConnectArmed(true);
+          // Arm only when this webview session was already connected (renderer
+          // crash + reload), never on a fresh app launch.
+          if (wasDevConnected()) {
+            setAutoConnectArmed(true);
+          }
         }
       }
     } catch (e) {
@@ -514,6 +519,7 @@ export default function FindingRobotView() {
       } catch (e) {
         // localStorage might not be available
       }
+      markDevConnected();
     };
 
     const connectWifi = async (host: string): Promise<void> => {

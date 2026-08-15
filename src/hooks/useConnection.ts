@@ -31,6 +31,7 @@ import {
   DAEMON_CONFIG,
 } from '../config/daemon';
 import { enableSimulationMode } from '../utils/simulationMode';
+import { clearDevConnected } from '../utils/devAutoReconnect';
 import { telemetry } from '../utils/telemetry';
 import type { ConnectionMode as ConnectionModeType } from '../types/robot';
 
@@ -223,6 +224,8 @@ export function useConnection(): UseConnectionResult {
       // stopDaemon handles clear_local_proxy_target internally for WiFi mode
       // (after graceful shutdown so HTTP requests can still reach the remote daemon).
       await stopDaemon();
+      // An intentional disconnect must not arm the dev auto-reconnect.
+      clearDevConnected();
       return true;
     } catch {
       return false;
