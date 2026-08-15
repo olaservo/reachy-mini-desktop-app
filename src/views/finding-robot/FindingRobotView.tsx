@@ -310,6 +310,10 @@ export default function FindingRobotView() {
   const [selectedMode, setSelectedMode] = useState<ConnectionModeType | null>(null);
   const [dots, setDots] = useState<string>('');
   const hasRestoredFromStorage = useRef<boolean>(false);
+  // State rather than a ref: the auto-connect effect below has to re-run when
+  // this flips, and a ref mutation doesn't retrigger it.
+  const [autoConnectArmed, setAutoConnectArmed] = useState<boolean>(false);
+  const hasAutoConnected = useRef<boolean>(false);
   const { showToast } = useToast();
 
   // Settings menu for environment reset
@@ -442,6 +446,7 @@ export default function FindingRobotView() {
         if (isAvailable) {
           setSelectedMode(savedMode);
           hasRestoredFromStorage.current = true;
+          setAutoConnectArmed(true);
         }
       }
     } catch (e) {
@@ -545,6 +550,23 @@ export default function FindingRobotView() {
       ((selectedMode === ConnectionMode.USB && usbRobot.available) ||
         (selectedMode === ConnectionMode.WIFI && wifiRobots.selectedRobot) ||
         selectedMode === ConnectionMode.SIMULATION));
+
+  /**
+   * Reconnect without a click when the mode came from storage.
+   *
+   * The WebView2 renderer can die and reload on its own, which drops all React
+   * state and lands the user back on this screen even though the Rust side
+   * never disconnected. The mode is already restored above; this acts on it
+   * once the target is actually connectable.
+   *
+   * Only fires for a mode read from localStorage, never for the USB/WiFi
+   * auto-select fallbacks, so a first-ever launch still waits for the user.
+   */
+  useEffect(() => {
+    if (!autoConnectArmed || hasAutoConnected.current || isBusy || !canStart) return;
+    hasAutoConnected.current = true;
+    handleStart();
+  }, [autoConnectArmed, isBusy, canStart, handleStart]);
 
   return (
     <Box
