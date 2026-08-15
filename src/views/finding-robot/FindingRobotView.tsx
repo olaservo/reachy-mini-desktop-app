@@ -506,9 +506,22 @@ export default function FindingRobotView() {
     if (isBusy) return;
     if (!selectedMode && !manualIp.trim()) return;
 
+    // Remember what actually worked. handleSelectMode only fires on a tile
+    // click, so a mode reached by auto-select was never being recorded.
+    const persistMode = (mode: ConnectionModeType): void => {
+      try {
+        localStorage.setItem(LAST_CONNECTION_MODE_KEY, mode);
+      } catch (e) {
+        // localStorage might not be available
+      }
+    };
+
     const connectWifi = async (host: string): Promise<void> => {
       if (!(await verifyWifiHost(host))) return;
       const ok = await connect(ConnectionMode.WIFI, { host });
+      if (ok) {
+        persistMode(ConnectionMode.WIFI);
+      }
       if (!ok) {
         // Pre-flight passed but the local proxy failed to bind (e.g. port
         // already held by another process). Surface it so the user can act.
@@ -528,7 +541,9 @@ export default function FindingRobotView() {
     // 🔌 Unified connection API - same for USB, WiFi, and Simulation
     switch (selectedMode) {
       case ConnectionMode.USB:
-        await connect(ConnectionMode.USB, { portName: usbRobot.portName ?? undefined });
+        if (await connect(ConnectionMode.USB, { portName: usbRobot.portName ?? undefined })) {
+          persistMode(ConnectionMode.USB);
+        }
         break;
       case ConnectionMode.WIFI:
         {
@@ -538,7 +553,9 @@ export default function FindingRobotView() {
         }
         break;
       case ConnectionMode.SIMULATION:
-        await connect(ConnectionMode.SIMULATION);
+        if (await connect(ConnectionMode.SIMULATION)) {
+          persistMode(ConnectionMode.SIMULATION);
+        }
         break;
     }
   }, [selectedMode, isBusy, usbRobot, wifiRobots, manualIp, connect, verifyWifiHost, showToast]);
