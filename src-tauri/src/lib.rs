@@ -27,7 +27,11 @@ fn crash_marker_path() -> Option<std::path::PathBuf> {
 }
 use discovery::DiscoveryState;
 use local_proxy::LocalProxyState;
-use std::sync::Arc;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use tauri::{Manager, State};
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
@@ -143,6 +147,139 @@ fn get_logs(state: State<DaemonState>) -> Result<Vec<String>, String> {
     Ok(logs.iter().cloned().collect())
 }
 
+static CAMERA_VIEWER_HTML: Mutex<String> = Mutex::new(String::new());
+static CAMERA_VIEWER_PORT: Mutex<Option<u16>> = Mutex::new(None);
+
+/// True when the header block has exactly one `Host` equal to `expected`.
+fn camera_viewer_host_allowed(req: &[u8], expected: &str) -> bool {
+    let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&req[..end]) else {
+        return false;
+    };
+    let mut found: Option<&str> = None;
+    for (i, line) in text.split("\r\n").enumerate() {
+        if i == 0 {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if found.is_some() {
+            return false;
+        }
+        found = Some(value.trim());
+    }
+    found == Some(expected)
+}
+
+fn camera_viewer_write(stream: &mut impl Write, response: &[u8]) {
+    if let Err(e) = stream.write_all(response) {
+        log::warn!("[camera] Viewer write failed: {e}");
+    }
+}
+
+fn clear_camera_viewer_port_if_current(port: u16) {
+    let mut guard = CAMERA_VIEWER_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    if *guard == Some(port) {
+        *guard = None;
+    }
+}
+
+/// Serve the camera viewer over loopback so Snap/Flatpak browsers can load it.
+fn ensure_camera_viewer_server() -> Result<u16, String> {
+    let mut port_guard = CAMERA_VIEWER_PORT
+        .lock()
+        .map_err(|e| format!("Camera viewer port mutex poisoned: {e}"))?;
+    if let Some(port) = *port_guard {
+        return Ok(port);
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind camera viewer: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read camera viewer address: {e}"))?
+        .port();
+    let expected_host = format!("127.0.0.1:{port}");
+
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(e) => match e.kind() {
+                    ErrorKind::Interrupted
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::ConnectionReset => {
+                        log::warn!("[camera] Viewer accept failed: {e}");
+                        continue;
+                    }
+                    _ => {
+                        log::error!("[camera] Viewer accept failed: {e}");
+                        clear_camera_viewer_port_if_current(port);
+                        break;
+                    }
+                },
+            };
+            let timeout = Some(Duration::from_secs(2));
+            let _ = stream.set_read_timeout(timeout);
+            let _ = stream.set_write_timeout(timeout);
+            let mut req = Vec::new();
+            let mut tmp = [0u8; 512];
+            let mut headers_complete = false;
+            let mut peer_closed = false;
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => {
+                        peer_closed = true;
+                        break;
+                    }
+                    Err(_) => break,
+                    Ok(n) => {
+                        req.extend_from_slice(&tmp[..n]);
+                        if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            headers_complete = true;
+                            break;
+                        }
+                        if req.len() > 8192 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !peer_closed {
+                if headers_complete && camera_viewer_host_allowed(&req, &expected_host) {
+                    let html = CAMERA_VIEWER_HTML
+                        .lock()
+                        .ok()
+                        .map(|guard| guard.clone())
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        html.len(),
+                        html
+                    );
+                    camera_viewer_write(&mut stream, response.as_bytes());
+                } else {
+                    camera_viewer_write(
+                        &mut stream,
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        }
+        clear_camera_viewer_port_if_current(port);
+    });
+
+    *port_guard = Some(port);
+    log::info!("[camera] Viewer listening on http://127.0.0.1:{port}/");
+    Ok(port)
+}
+
 #[tauri::command]
 fn open_external_camera_viewer(
     app_handle: tauri::AppHandle,
@@ -157,14 +294,13 @@ fn open_external_camera_viewer(
     let html = external_camera_viewer_html()
         .replace("__SIGNALING_URL__", &signaling_url_json)
         .replace("__GST_WEBRTC_API__", gstwebrtc_api_js());
-    let path = std::env::temp_dir().join("reachy-mini-camera-viewer.html");
 
-    std::fs::write(&path, html)
-        .map_err(|e| format!("Failed to write external camera viewer: {}", e))?;
+    *CAMERA_VIEWER_HTML
+        .lock()
+        .map_err(|e| format!("Camera viewer html mutex poisoned: {e}"))? = html;
 
-    let url = tauri::Url::from_file_path(&path)
-        .map_err(|_| format!("Failed to convert path to file URL: {}", path.display()))?
-        .to_string();
+    let port = ensure_camera_viewer_server()?;
+    let url = format!("http://127.0.0.1:{port}/");
 
     app_handle
         .opener()
@@ -724,4 +860,112 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod camera_viewer_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const EXPECTED: &str = "127.0.0.1:9";
+
+    fn http_req(headers: &str) -> Vec<u8> {
+        format!("GET / HTTP/1.1\r\n{headers}\r\n").into_bytes()
+    }
+
+    #[test]
+    fn host_allowed_exact_match() {
+        let req = http_req("Host: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_allowed_case_insensitive_name() {
+        let req = http_req("host: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_when_missing() {
+        let req = http_req("Accept: */*\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_when_incomplete() {
+        let req = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:9\r\n";
+        assert!(!camera_viewer_host_allowed(req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_localhost() {
+        let req = http_req("Host: localhost:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_ipv6() {
+        let req = http_req("Host: [::1]:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_wrong_port() {
+        let req = http_req("Host: 127.0.0.1:8\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_rejected_duplicate() {
+        let req = http_req("Host: 127.0.0.1:9\r\nHost: 127.0.0.1:9\r\n");
+        assert!(!camera_viewer_host_allowed(&req, EXPECTED));
+    }
+
+    #[test]
+    fn host_ignores_x_forwarded_host() {
+        let forwarded_only = http_req("X-Forwarded-Host: 127.0.0.1:9\r\n");
+        assert!(!camera_viewer_host_allowed(&forwarded_only, EXPECTED));
+        let both = http_req("X-Forwarded-Host: evil.example\r\nHost: 127.0.0.1:9\r\n");
+        assert!(camera_viewer_host_allowed(&both, EXPECTED));
+    }
+
+    fn camera_viewer_get(port: u16, host: &str) -> (String, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("write timeout");
+        let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).expect("write request");
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+        (head.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn camera_viewer_get_framing() {
+        const MARKER: &str = "camera-viewer-test-marker";
+        *CAMERA_VIEWER_HTML.lock().unwrap() = MARKER.to_string();
+        let port = ensure_camera_viewer_server().expect("bind camera viewer");
+        let expected = format!("127.0.0.1:{port}");
+
+        let (head, body) = camera_viewer_get(port, &expected);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "{head}"
+        );
+        assert_eq!(body, MARKER);
+
+        let (head, body) = camera_viewer_get(port, "evil.example");
+        assert!(head.starts_with("HTTP/1.1 403 "), "{head}");
+        assert!(body.is_empty(), "{body}");
+    }
 }
