@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Box, Typography } from '@mui/material';
 import { getAppWindow } from '../utils/windowUtils';
+import { isLinux } from '../utils/platform';
 import { getVersion } from '@utils/tauriCompat';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import useAppStore from '../store/useAppStore';
@@ -14,7 +15,7 @@ import { useAppPalette, TYPO, FONT_WEIGHT, DURATION, transition } from '@styles'
  * Uses a React Portal to render directly in the body, ensuring it stays
  * above MUI Modals (which also use portals) regardless of parent stacking context.
  */
-export default function AppTopBar(): React.ReactPortal {
+export default function AppTopBar(): React.ReactPortal | null {
   const palette = useAppPalette();
   const { connectionMode, rightPanelView } = useAppStore();
   const [currentVersion, setCurrentVersion] = useState<string | null>('');
@@ -42,6 +43,11 @@ export default function AppTopBar(): React.ReactPortal {
     checkWindow();
   }, []);
 
+  if (isLinux()) {
+    // Linux uses native window decorations; a custom drag strip would overlap them.
+    return null;
+  }
+
   // Render via portal to escape parent stacking context.
   // z-index 10000000 keeps AppTopBar above all modals so drag always works.
   // Any interactive element that must be clickable within the top 33px of a modal
@@ -61,7 +67,8 @@ export default function AppTopBar(): React.ReactPortal {
         position: 'fixed',
         top: 0,
         left: 65,
-        right: rightPanelView === 'embedded-app' ? '450px' : 0,
+        // Stop at the column split so the embedded app's own top bar stays clickable.
+        right: rightPanelView === 'embedded-app' ? '50%' : 0,
         height: 33,
         cursor: 'move',
         userSelect: 'none',
